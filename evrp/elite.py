@@ -1,33 +1,64 @@
-from typing import Dict, Tuple, List
-from evrp.solution import hash_solution
-from evrp.costs import full_cost
+# evrp/elite.py
+from __future__ import annotations
+from typing import List, Tuple, Sequence, Iterable, Optional, Union
+from random import Random
+from .cluster import embed_solution, nearest_centroid_idx, kmeans
 
-# elite: Dict[int, Tuple[solution, cost]]
+# (cost, sol, embedding)
+EliteEntry = Tuple[float, List[List[int]], List[float]]
 
-def update_elite_archive(elite: Dict[int, Tuple], solution, cost: float, max_size: int = 100):
-    h = hash_solution(solution)
-    elite[h] = (solution, cost)
+def update_elite_archive(
+    elite: List[EliteEntry],
+    sol: List[List[int]],
+    cost: float,
+    dim: int = 32,          # <-- default embedding size
+    max_size: int = 100     # <-- default archive cap
+):
+    emb = embed_solution(sol, dim)
+    elite.append((cost, sol, emb))
+    elite.sort(key=lambda e: e[0])
     if len(elite) > max_size:
-        # drop worst by cost
-        worst_h = max(elite.keys(), key=lambda k: elite[k][1])
-        elite.pop(worst_h, None)
+        del elite[max_size:]
 
-def cluster_elite_archive(elite: Dict[int, Tuple], k: int = 3) -> List:
-    if not elite:
+def _iter_entries(elite: Union[List[EliteEntry], dict]) -> Iterable[EliteEntry]:
+    # Accept both list and dict to be defensive
+    return elite.values() if isinstance(elite, dict) else elite
+
+
+def _normalize_points(points: List[List[float]]) -> List[List[float]]:
+    """
+    Make all vectors the same length (pad with zeros or truncate).
+    We choose the MAX length so we don't throw info away unless necessary.
+    """
+    if not points:
+        return points
+    target = max(len(p) for p in points)
+    norm = []
+    for p in points:
+        if len(p) < target:
+            norm.append(p + [0.0] * (target - len(p)))
+        elif len(p) > target:
+            norm.append(p[:target])
+        else:
+            norm.append(p)
+    return norm
+
+
+def cluster_elite_archive(
+    elite: Union[List[EliteEntry], dict],
+    k: int = 3,
+    rounds: int = 10,
+    rng: Optional[Random] = None
+) -> List[List[float]]:
+    entries = list(_iter_entries(elite))
+    if not entries:
         return []
-    # "centroids" = top-k best solutions by cost (simple & dependency-free)
-    top = sorted((v for v in elite.values()), key=lambda t: t[1])[:k]
-    return [sol for (sol, c) in top]
 
-def select_centroid(centroids: List, rng):
-    if not centroids:
-        return None
-    return rng.choice(centroids)
+    points = [e[2] for e in entries if e[2] is not None]
+    if not points:
+        return []
 
-def find_nearest_centroid(parent, centroids: List, problem, rng):
-    # pick centroid with closest travel cost (very rough similarity)
-    if not centroids:
-        return None
-    def travel(sol): return full_cost(sol, problem)  # includes penalty; fine for a stub
-    target = travel(parent)
-    return min(centroids, key=lambda c: abs(travel(c) - target))
+    points = _normalize_points(points)        # <-- enforce uniform dimensionality
+    k = min(k, len(points))
+    centers, _ = kmeans(points, k, rounds, rng)
+    return centers

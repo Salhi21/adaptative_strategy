@@ -3,6 +3,7 @@ import argparse, random
 from types import SimpleNamespace
 from evrp.data import load_evrp, apply_defaults
 from evrp.optimize import main_optimization
+from evrp.heuristics import solve_ll_with_trace
 
 def describe_solution(problem, sol):
     print("Routes:")
@@ -10,6 +11,20 @@ def describe_solution(problem, sol):
         print("  ", " -> ".join(map(str, r)))
     print("Travel distance:", calculate_travel_cost(sol, problem))
     print("Total cost     :", full_cost(sol, problem))
+
+def print_routes_with_recharges(problem, sol):
+    ok, _, _, traces = solve_ll_with_trace(sol, problem)
+    print(f"LL feasible: {ok}")
+    for r_idx, (route, tr) in enumerate(zip(sol, traces), start=1):
+        # start with the first node
+        tokens = [str(route[0])]
+        # for each leg i->j, append (i,b) if a stop happens, then j
+        for leg in tr:
+            i, j, b = leg["i"], leg["j"], leg["stop"]
+            if b is not None:
+                tokens.append(f"({i},{b})")
+            tokens.append(str(j))
+        print(f"R{r_idx}: " + " -> ".join(tokens))
 
 def main():
     ap = argparse.ArgumentParser()
@@ -40,7 +55,7 @@ def main():
 
     # Global constants (stations from data; no decoration/randomization)
     problem.energy_capacity = 100.0  # Bmax
-    problem.energy_consumption = 1 / 6.0  # alpha (kWh/km)
+    problem.energy_consumption = 1/6  # alpha (kWh/km)
     problem.init_soc_ratio = 1.0
     # Waiting cost per recharge event (wbk) — use per-station map or fallback:
     problem.waiting_cost = 5.0  # used as per-visit default w_bk
@@ -68,12 +83,17 @@ def main():
     )
 
     rng = random.Random(args.seed)
-    best_sol, best_cost = main_optimization(problem, cfg, rng)
+    best_sol, best_overall_cost = main_optimization(problem, cfg, rng)
 
     print("=== DONE ===")
-    print("Best cost:", best_cost)
+    print("Best cost:", best_overall_cost)
     if best_sol:
-        print("Best solution structure:", [len(r) for r in best_sol])
+        print("Best solution routes (node sequences):")
+        for i, r in enumerate(best_sol, start=1):
+            print(f"  R{i} ({len(r)} nodes): " + " -> ".join(map(str, r)))
+    print("Best solution with recharge stops inline:")
+    print_routes_with_recharges(problem, best_sol)
+
 
 if __name__ == "__main__":
     main()
