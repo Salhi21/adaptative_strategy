@@ -134,9 +134,7 @@ def main_optimization(problem: Problem, cfg: SimpleNamespace, rng: random.Random
         eps = max(cfg.eps_min, eps)  # ensure clamp
         state = next_state
 
-        if gen % 50 == 0:
-            # defensive formatting if best_c is inf
-            bc = f"{best_c:.2f}" if not math.isinf(best_c) else "inf"
-            print(f"[gen {gen}] best={bc} eps={eps:.3f} act={action}")
+        bc = f"{best_c:.2f}" if not math.isinf(best_c) else "inf"
+        print(f"[gen {gen}] best={bc} eps={eps:.3f} act={action}")
 
     return best_s, best_c

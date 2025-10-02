@@ -3,7 +3,7 @@ import argparse, random
 from types import SimpleNamespace
 from evrp.data import load_evrp, apply_defaults
 from evrp.optimize import main_optimization
-from evrp.heuristics import solve_ll_with_trace
+from evrp.heuristics import solve_ll_with_trace, solve_ll
 
 def describe_solution(problem, sol):
     print("Routes:")
@@ -13,19 +13,18 @@ def describe_solution(problem, sol):
     print("Total cost     :", full_cost(sol, problem))
 
 def print_routes_with_recharges(problem, sol):
-    ok, _, _, traces = solve_ll_with_trace(sol, problem)
+    ok, _, _, traces = solve_ll(sol, problem, return_trace=True)
     print(f"LL feasible: {ok}")
     for r_idx, (route, tr) in enumerate(zip(sol, traces), start=1):
-        # start with the first node
-        tokens = [str(route[0])]
-        # for each leg i->j, append (i,b) if a stop happens, then j
+        tokens = [str(route[0])]  # start at depot
         for leg in tr:
             i, j, b = leg["i"], leg["j"], leg["stop"]
             if b is not None:
-                tokens.append(f"({i},{b})")
-            tokens.append(str(j))
+                # show station stop inline: (station, next-customer)
+                tokens.append(f"({b},{j})")
+            else:
+                tokens.append(str(j))
         print(f"R{r_idx}: " + " -> ".join(tokens))
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--instance", required=True, help="Path to .evrp instance file")
