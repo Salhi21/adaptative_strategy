@@ -89,8 +89,7 @@ def solve_ll(sol_or_route, problem, rng: Optional[random.Random] = None, return_
     alpha = getattr(problem, "energy_consumption", 0.0) or 1e-9  # avoid division by zero
     stations = tuple(problem.stations or ())
     ev_range_km = BMAX / alpha
-
-    # Optional maps
+  # Optional maps
     detour_km = getattr(problem, "station_detour_km", {}) or {}       # extra distance per station b
     price_map = getattr(problem, "station_energy_price", {}) or {}    # $/kWh per station b
     wait_cost = getattr(problem, "station_wait_cost", {}) or {}       # $/visit per station b
@@ -122,12 +121,15 @@ def solve_ll(sol_or_route, problem, rng: Optional[random.Random] = None, return_
             need_direct = alpha * D[i][j]
 
             # Direct drive if enough SoC
+
             if soc >= need_direct:
                 soc -= need_direct
+
                 if return_trace:
                     legs_trace.append({"i": i, "j": j, "stop": None, "cost": 0.0})
                 continue
-
+            #if soc < need_direct:
+                #print(f"⚡ Recharge needed before {j} (SOC={soc:.2f}, need={need_direct:.2f})")
             # Otherwise pick cheapest feasible station (charge-to-full)
             best_cost = float("inf"); best_b = None
             for b in candidate_stations(i, j):
@@ -176,6 +178,7 @@ def solve_ll(sol_or_route, problem, rng: Optional[random.Random] = None, return_
             total += c
             if return_trace:
                 all_traces.append(tr)
+
         return True, sol_or_route, total, all_traces
     else:
         ok, c, tr = _one_route(sol_or_route)
@@ -186,6 +189,7 @@ def solve_ll(sol_or_route, problem, rng: Optional[random.Random] = None, return_
 
 def solve_ll_exact(sol_or_route, problem, rng: Optional[random.Random] = None):
     """Stable API: return exactly (ok: bool, ll_cost: float)."""
+
     ok, _same_input, ll_cost, _trace = solve_ll(sol_or_route, problem, rng, return_trace=False)
     return bool(ok), float(ll_cost)
 

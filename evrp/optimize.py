@@ -22,22 +22,39 @@ def _safe_cost(sol, problem: Problem) -> float:
 
 
 def initialize_algorithm(problem: Problem, pop_size: int, eps_start: float, rng):
+    """
+    Initialize population, elite archive, centroids, and Q-learning structures.
+    Used for cost-minimization Q-learning hyper-heuristic.
+    """
+    # --- 1) Initial population generation ---
     P = []
     for _ in range(pop_size):
         sol = generate_initial_solution(problem)
         sol = quick_repair(sol, problem)
         P.append(sol)
 
-    elite = []          # <-- was {} ; make it a list
+    # --- 2) Elite & centroids ---
+    elite = []       # stores tuples (cost, sol, emb)
     centroids = []
-    best_cost = float('inf'); best_sol = None
-    Q = {}; state = (0, 'start'); eps = eps_start
+
+    # --- 3) Global best placeholders ---
+    best_cost = float("inf")
+    best_sol = None
+
+    # --- 4) Q-learning setup ---
+    Q = {}
+    state = (0, "start")
+    eps = eps_start
+
+    # Initialize Q-values optimistically high (since we minimize cost)
+    for a in ACTIONS:
+        Q[(state, a)] = 1e6  # large initial cost; encourages exploration
+
     return P, elite, centroids, best_cost, best_sol, Q, state, eps
 
 def main_optimization(problem: Problem, cfg: SimpleNamespace, rng: random.Random):
     """
     Q-learning–driven hyper-heuristic EA for (E)VRP.
-
     Expects cfg to provide:
       - pop_size, max_gens, tournament_size
       - alpha, gamma
@@ -55,11 +72,11 @@ def main_optimization(problem: Problem, cfg: SimpleNamespace, rng: random.Random
     ) = initialize_algorithm(problem, cfg.pop_size, cfg.eps_start, rng)
 
     for gen in range(cfg.max_gens):
-        # ---- 1) Fitness (with per-generation cost cache) ----
-        costs_P = [_safe_cost(s, problem) for s in P]
-        fitness = [1.0 / (1.0 + max(0.0, c)) for c in costs_P]  # robust if cost==inf
+        # ---- 1) Fitness (inverse cost, robust to inf) ----
+        costs_P = [full_cost(s, problem) for s in P]
+        fitness = [1.0 / (1.0 + c) if math.isfinite(c) else 0.0 for c in costs_P]
 
-        # ---- 2) Mating pool (tournament, clamped) ----
+        # ---- 2) Mating pool (tournament) ----
         M: List[Any] = []
         tsize = max(1, min(getattr(cfg, "tournament_size", 2), len(P)))
         for _ in range(len(P)):
@@ -68,14 +85,10 @@ def main_optimization(problem: Problem, cfg: SimpleNamespace, rng: random.Random
             M.append(P[winner_idx])
 
         # ---- 3) Choose action (ε-greedy) ----
-        if rng.random() < eps:
-            action = rng.choice(ACTIONS)
-        else:
-            action = get_best_action(Q, state, ACTIONS)
+        action = rng.choice(ACTIONS) if rng.random() < eps else get_best_action(Q, state, ACTIONS)
 
-        # ---- 4) Generate offspring via selected heuristic (+repair) ----
+        # ---- 4) Generate offspring using selected heuristic ----
         P_new: List[Any] = []
-        # Use cached centroids when calling H4; if elite empty, fallback to H1.
         use_h4 = action == "H4" and bool(elite) and len(centroids) > 0
 
         for parent in M:
@@ -86,18 +99,23 @@ def main_optimization(problem: Problem, cfg: SimpleNamespace, rng: random.Random
             elif action == "H3":
                 child = heuristics.heuristic_h3_relaxed_ll(parent, problem, rng)
             elif use_h4:
-                # IMPORTANT: pass cached centroids; do NOT recluster inside H4
                 child = heuristics.heuristic_h4_similarity_based(parent, centroids, elite, problem, rng)
             else:
-                # Guard: if H4 chosen but no elite/centroids yet, fallback to H1
-                child = heuristics.heuristic_h1_full_hierarchical(parent, elite, problem, rng)
+                child = heuristics.heuristic_h1_full_hierarchical(parent, elite, centroids, problem, rng)
 
             child = quick_repair(child, problem)
             P_new.append(child)
 
-        # ---- 5) Best offspring of this generation ----
-        costs_new = [_safe_cost(s, problem) for s in P_new]
-        # handle all-inf edge case safely
+        # ---- 5) Evaluate offspring costs ----
+        costs_new = []
+        for c in P_new:
+            if action in ("H3", "H4"):
+                c_cost = full_cost(c, problem, ul_only=True)
+            else:
+                c_cost = full_cost(c, problem)
+            costs_new.append(c_cost)
+
+        # ---- 6) Best offspring ----
         if all(math.isinf(c) for c in costs_new):
             best_off_cost = float("inf")
             best_off = P_new[0]
@@ -106,35 +124,47 @@ def main_optimization(problem: Problem, cfg: SimpleNamespace, rng: random.Random
             best_off = P_new[best_idx]
             best_off_cost = costs_new[best_idx]
 
-        # ---- 6) Reward & elite update ----
-        prev_best = best_c
-        # Positive reward only when improving the global best
-        reward = max(0.0, prev_best - best_off_cost)
-
         improved = best_off_cost < best_c
         if improved:
             best_c, best_s = best_off_cost, best_off
             update_elite_archive(elite, best_off, best_off_cost)
-            # Recompute centroids ONCE per generation after elite update
             centroids = cluster_elite_archive(elite)
 
-        # ---- 7) Q-learning update ----
+        # ---- 7) Q-learning update (cost-based) ----
+        # Normalize cost for stable learning
+        if not math.isfinite(best_off_cost) or best_off_cost <= 0:
+            norm_cost = 1.0  # neutral cost
+        elif not math.isfinite(best_c) or best_c <= 0:
+            norm_cost = best_off_cost
+        else:
+            norm_cost = min(best_off_cost / (1.0 + best_c), 1e6)  # clamp huge ratios
+
         next_state = (1 if improved else 0, action)
-        q_update(Q, state, action, reward, next_state, cfg.alpha, cfg.gamma, ACTIONS)
+        q_update(Q, state, action, norm_cost, next_state, cfg.alpha, cfg.gamma, ACTIONS)
 
         # ---- 8) Survivor selection (μ+λ) ----
         combined = P + P_new
-        combined_costs = costs_P + costs_new  # aligns with combined order
-        # Sort by cost safely
+        combined_costs = costs_P + costs_new
         order = sorted(range(len(combined)), key=lambda i: combined_costs[i])
         P = [combined[i] for i in order[: cfg.pop_size]]
 
-        # ---- 9) Epsilon decay (once per generation, clamped) ----
-        eps = decay_epsilon(eps, cfg.eps_min, cfg.decay)
-        eps = max(cfg.eps_min, eps)  # ensure clamp
+        # ---- 9) Epsilon decay ----
+        eps = max(cfg.eps_min, decay_epsilon(eps, cfg.eps_min, cfg.decay))
         state = next_state
 
-        bc = f"{best_c:.2f}" if not math.isinf(best_c) else "inf"
-        print(f"[gen {gen}] best={bc} eps={eps:.3f} act={action}")
+    # ---- 10) Logging ----
+    bc = f"{best_c:.2f}" if math.isfinite(best_c) else "inf"
+    print(f"[gen {gen}] best={bc} eps={eps:.3f} act={action}")
+
+    # Print Q-values for all states (aggregated)
+    snapshot = {}
+    for (s, a), val in Q.items():
+        if s not in snapshot:
+            snapshot[s] = {}
+        snapshot[s][a] = round(val, 3)
+
+    for s, qs in snapshot.items():
+        print(f"  state={s} -> {qs}")
 
     return best_s, best_c
+

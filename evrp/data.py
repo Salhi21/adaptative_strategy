@@ -30,26 +30,25 @@ class Problem:
     distance_matrix: List[List[float]] = field(default_factory=list)
 
     # Energy model
-    energy_capacity: float = 100.0     # B_max (kWh) — from file
-    energy_consumption: float = 1.0    # kWh/km (fixed per project spec)
-    init_soc_ratio: float = 1.0        # α0 (start SoC as fraction of B_max)
-    speed: Optional[float] = None      # km/h (unused unless you add time)
+    energy_capacity: float = 100.0  # B_max (kWh) — from file
+    energy_consumption: float = 1.0  # kWh/km (fixed per project spec)
+    init_soc_ratio: float = 1.0  # α0 (start SoC as fraction of B_max)
 
     # Costs & charging
-    waiting_cost: float = 5.0          # $/hour (fixed per project spec)
-    energy_cost: float = 4.22          # $/kWh  (fixed per project spec)
+    waiting_cost: float = 5.0  # $/hour (fixed per project spec)
+    energy_cost: float = 4.22  # $/kWh  (fixed per project spec)
     charge_rate: Optional[float] = None  # kW (global fallback; station may override)
-    fixed_charge_time_h: float = 0.5   # 30 minutes overhead per recharge (optional)
+    fixed_charge_time_h: float = 0.5  # 30 minutes overhead per recharge (optional)
 
     # Demands (capacity). Defaults to zero unless a DEMAND section is added later.
     demands: Dict[int, int] = field(default_factory=dict)
 
     # Per-station optional overrides (all optional; use if your instances provide them)
-    station_charge_rate: Dict[int, float] = field(default_factory=dict)   # kW
+    station_charge_rate: Dict[int, float] = field(default_factory=dict)  # kW
     station_energy_price: Dict[int, float] = field(default_factory=dict)  # $/kWh
-    station_wait_time: Dict[int, float] = field(default_factory=dict)     # hours per visit
-    station_wait_cost: Dict[int, float] = field(default_factory=dict)     # $ per visit
-    station_detour_km: Dict[int, float] = field(default_factory=dict)     # extra km on arrival
+    station_wait_time: Dict[int, float] = field(default_factory=dict)  # hours per visit
+    station_wait_cost: Dict[int, float] = field(default_factory=dict)  # $ per visit
+    station_detour_km: Dict[int, float] = field(default_factory=dict)  # extra km on arrival
 
     # Convenience
     @property
@@ -86,17 +85,16 @@ def load_evrp(path: str) -> Problem:
     """
     Load an EVRP instance.
 
-    Expected header keys:
-      NAME, VEHICLES, DIMENSION, STATIONS, CAPACITY, ENERGY_CAPACITY,
-      (ENERGY_CONSUMPTION is ignored and forced to 1.0 per project spec),
-      followed by NODE_COORD_SECTION and coordinates lines: "idx x y".
+    Expected sections:
+      - Header: NAME, VEHICLES, DIMENSION, STATIONS, CAPACITY, ENERGY_CAPACITY
+      - NODE_COORD_SECTION: node coordinates
+      - DEMAND_SECTION: customer demands
+      - STATIONS_COORD_SECTION: station node IDs
+      - DEPOT_SECTION: depot node ID
 
-    Assumptions:
-      - Depot index = 1.
-      - Stations are the last `STATIONS` nodes.
-      - Customers are the nodes between depot and stations.
-      - Coordinates are 1-based indexed in the file; we maintain 1-based arrays.
+    Note: ENERGY_CONSUMPTION is ignored and forced to 1.0 per project spec.
     """
+    # Header values
     name: str = ""
     vehicles: Optional[int] = None
     capacity: Optional[int] = None
@@ -104,32 +102,60 @@ def load_evrp(path: str) -> Problem:
     stations_cnt: Optional[int] = None
     energy_capacity: Optional[float] = None
 
+    # Data structures
     coords: List[Tuple[float, float]] = [(-1.0, -1.0)]  # pad index 0 (unused)
+    demands: Dict[int, int] = {}
+    station_nodes: List[int] = []
+    depot_node: int = 1  # Default
+
+    # Parsing state
     reading_coords = False
+    reading_demands = False
+    reading_stations = False
+    reading_depot = False
 
     with open(path, "r", encoding="utf-8") as f:
         for raw in f:
             line = raw.strip()
+
+            # Skip empty lines
             if not line:
                 continue
 
-            if reading_coords:
-                # Stop when the section ends (next header or blank)
-                if line and line[0].isdigit():
-                    parts = line.split()
-                    if len(parts) >= 3:
-                        idx = int(parts[0])
-                        x = float(parts[1])
-                        y = float(parts[2])
-                        if idx >= len(coords):
-                            coords.extend([(0.0, 0.0)] * (idx - len(coords) + 1))
-                        coords[idx] = (x, y)
-                    continue
-                else:
-                    reading_coords = False
-                    # fall through to parse potential next headers
+            # End of file
+            if line == "EOF":
+                break
 
-            # Header parsing
+            # ============ SECTION HEADERS ============
+            if line.startswith("NODE_COORD_SECTION"):
+                reading_coords = True
+                reading_demands = False
+                reading_stations = False
+                reading_depot = False
+                continue
+
+            elif line.startswith("DEMAND_SECTION"):
+                reading_coords = False
+                reading_demands = True
+                reading_stations = False
+                reading_depot = False
+                continue
+
+            elif line.startswith("STATIONS_COORD_SECTION"):
+                reading_coords = False
+                reading_demands = False
+                reading_stations = True
+                reading_depot = False
+                continue
+
+            elif line.startswith("DEPOT_SECTION"):
+                reading_coords = False
+                reading_demands = False
+                reading_stations = False
+                reading_depot = True
+                continue
+
+            # ============ HEADER PARSING ============
             if line.startswith("NAME:"):
                 name = line.split(":", 1)[1].strip()
             elif line.startswith("VEHICLES:"):
@@ -143,12 +169,55 @@ def load_evrp(path: str) -> Problem:
             elif line.startswith("ENERGY_CAPACITY:"):
                 energy_capacity = float(line.split(":", 1)[1].strip())
             elif line.startswith("ENERGY_CONSUMPTION:"):
-                # Present in some files, but we override to 1.0 (project spec).
+                # Present in some files, but we override to 1.0 (project spec)
                 _ = float(line.split(":", 1)[1].strip())
-            elif line.startswith("NODE_COORD_SECTION"):
-                reading_coords = True
 
-    # Validations
+            # ============ DATA SECTIONS ============
+            elif reading_coords:
+                # Parse: node_id x y
+                parts = line.split()
+                if len(parts) >= 3 and parts[0].isdigit():
+                    idx = int(parts[0])
+                    x = float(parts[1])
+                    y = float(parts[2])
+
+                    # Extend coords list if necessary
+                    if idx >= len(coords):
+                        coords.extend([(0.0, 0.0)] * (idx - len(coords) + 1))
+                    coords[idx] = (x, y)
+
+            elif reading_demands:
+                # Parse: node_id demand
+                parts = line.split()
+                if len(parts) >= 2 and parts[0].isdigit():
+                    node_id = int(parts[0])
+                    demand = int(parts[1])
+                    demands[node_id] = demand
+
+            elif reading_stations:
+                # Parse: station_node_id (one per line until DEPOT_SECTION or -1)
+                if line.startswith("DEPOT_SECTION"):
+                    reading_stations = False
+                    reading_depot = True
+                    continue
+
+                if line.lstrip('-').isdigit():
+                    station_id = int(line)
+                    if station_id == -1:
+                        reading_stations = False
+                    elif station_id > 0:
+                        station_nodes.append(station_id)
+
+            elif reading_depot:
+                # Parse: depot_node_id (usually 1, then -1 to end)
+                if line.lstrip('-').isdigit():
+                    depot_id = int(line)
+                    if depot_id > 0:
+                        depot_node = depot_id
+                    elif depot_id == -1:
+                        reading_depot = False  # End of depot section
+
+    # ============ VALIDATIONS ============
     if dimension is None or stations_cnt is None:
         raise ValueError("Missing DIMENSION or STATIONS in instance header.")
     if vehicles is None or capacity is None or energy_capacity is None:
@@ -156,21 +225,19 @@ def load_evrp(path: str) -> Problem:
     if len(coords) - 1 != dimension:
         raise ValueError(f"Expected {dimension} coordinates, found {len(coords) - 1}.")
 
-    depot = 1
-    num_customers = dimension - stations_cnt - 1
-    if num_customers < 0:
-        raise ValueError("Computed negative number of customers. Check STATIONS and DIMENSION.")
-
-    customers = list(range(2, 2 + num_customers))  # nodes immediately after depot
-    stations = list(range(dimension - stations_cnt + 1, dimension + 1))  # last nodes are stations
+    # ============ BUILD PROBLEM ============
+    # Identify customers: all nodes except depot and stations
+    all_nodes = set(range(1, dimension + 1))
+    station_set = set(station_nodes)
+    customers = sorted(all_nodes - station_set - {depot_node})
 
     problem = Problem(
         name=name,
         vehicles=vehicles,
         capacity=capacity,
-        depot=depot,
+        depot=depot_node,
         customers=customers,
-        stations=stations,
+        stations=station_nodes,
         coords=coords,
         energy_capacity=energy_capacity,
         # Fixed values (per project spec):
@@ -182,8 +249,13 @@ def load_evrp(path: str) -> Problem:
     # Precompute distances
     problem.distance_matrix = build_distance_matrix(problem.coords)
 
-    # Default zero demands unless you add a DEMAND section later
-    problem.demands = {i: 0 for i in range(1, problem.n + 1)}
+    # Set demands (default to 0 for depot and stations)
+    problem.demands = demands
+    if depot_node not in problem.demands:
+        problem.demands[depot_node] = 0
+    for station in station_nodes:
+        if station not in problem.demands:
+            problem.demands[station] = 0
 
     return problem
 
@@ -192,12 +264,12 @@ def load_evrp(path: str) -> Problem:
 # Optional: runtime overrides
 # =========================
 def apply_defaults(
-    problem: Problem,
-    *,
-    charge_rate: Optional[float] = None,
-    energy_cost: Optional[float] = None,
-    waiting_cost: Optional[float] = None,
-    speed: Optional[float] = None,
+        problem: Problem,
+        *,
+        charge_rate: Optional[float] = None,
+        energy_cost: Optional[float] = None,
+        waiting_cost: Optional[float] = None,
+        speed: Optional[float] = None,
 ) -> Problem:
     """
     Apply runtime overrides. If not provided, keep current values.
@@ -212,3 +284,70 @@ def apply_defaults(
     if speed is not None:
         problem.speed = speed
     return problem
+
+
+# =========================
+# Helper functions
+# =========================
+def is_customer(problem: Problem, node_id: int) -> bool:
+    """Check if a node is a customer."""
+    return node_id in problem.customers
+
+
+def is_station(problem: Problem, node_id: int) -> bool:
+    """Check if a node is a charging station."""
+    return node_id in problem.stations
+
+
+def is_depot(problem: Problem, node_id: int) -> bool:
+    """Check if a node is the depot."""
+    return node_id == problem.depot
+
+
+def print_problem_summary(problem: Problem):
+    """Print a summary of the loaded problem."""
+    print("=" * 60)
+    print(f"Instance: {problem.name}")
+    print("=" * 60)
+    print(f"Vehicles:          {problem.vehicles}")
+    print(f"Dimension:         {problem.n}")
+    print(f"Capacity:          {problem.capacity}")
+    print(f"Energy Capacity:   {problem.energy_capacity} kWh")
+    print(f"Energy Consumption: {problem.energy_consumption} kWh/km")
+    print(f"Depot:             {problem.depot}")
+    print(f"Customers:         {len(problem.customers)} nodes")
+    print(f"Stations:          {len(problem.stations)} nodes")
+    print(f"\nStation IDs: {problem.stations}")
+    print(f"Depot Coordinates: {problem.coords[problem.depot]}")
+
+    # Sample demands
+    if problem.customers:
+        print(f"\nSample Customer Demands:")
+        for cust in problem.customers[:5]:
+            demand = problem.demands.get(cust, 0)
+            print(f"  Customer {cust}: {demand}")
+
+    # Sample distances
+    if len(problem.customers) >= 2:
+        c1, c2 = problem.customers[0], problem.customers[1]
+        d_depot_c1 = problem.distance_matrix[problem.depot][c1]
+        d_c1_c2 = problem.distance_matrix[c1][c2]
+        print(f"\nSample Distances:")
+        print(f"  Depot → Customer {c1}: {d_depot_c1:.2f} km")
+        print(f"  Customer {c1} → Customer {c2}: {d_c1_c2:.2f} km")
+
+
+problem = load_evrp("D:/pycharm/memoire/essai Q-learning/instance/E-n112-k8-s11.evrp")
+
+print("\n🔍 Quick verification check")
+print("=" * 50)
+print(f"Instance: {problem.name}")
+print(f"Vehicles: {problem.vehicles}")
+print(f"Total nodes: {problem.n}")
+print(f"Depot ID: {problem.depot}")
+print(f"Stations parsed: {problem.stations}")
+print(f"Customers (sample): {problem.customers[:10]}")
+print(f"Energy cap: {problem.energy_capacity}")
+print(f"Energy consumption: {problem.energy_consumption}")
+print(f"Distance(1→2): {problem.distance_matrix[1][2]:.2f} km")
+print("=" * 50)
