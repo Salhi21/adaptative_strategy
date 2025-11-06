@@ -337,17 +337,3 @@ def print_problem_summary(problem: Problem):
         print(f"  Customer {c1} → Customer {c2}: {d_c1_c2:.2f} km")
 
 
-problem = load_evrp("D:/pycharm/memoire/essai Q-learning/instance/E-n112-k8-s11.evrp")
-
-print("\n🔍 Quick verification check")
-print("=" * 50)
-print(f"Instance: {problem.name}")
-print(f"Vehicles: {problem.vehicles}")
-print(f"Total nodes: {problem.n}")
-print(f"Depot ID: {problem.depot}")
-print(f"Stations parsed: {problem.stations}")
-print(f"Customers (sample): {problem.customers[:10]}")
-print(f"Energy cap: {problem.energy_capacity}")
-print(f"Energy consumption: {problem.energy_consumption}")
-print(f"Distance(1→2): {problem.distance_matrix[1][2]:.2f} km")
-print("=" * 50)
